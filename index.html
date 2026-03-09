@@ -656,6 +656,7 @@ input[type=date]::-webkit-calendar-picker-indicator:hover{opacity:1;}
       <div style="margin-top:6px;display:flex;gap:5px;align-items:center">
         <span id="sb-save-status" style="font-family:var(--mono);font-size:7.5px;color:var(--text3);letter-spacing:.08em">대기중...</span>
         <button onclick="clearData()" style="font-family:var(--mono);font-size:7px;background:rgba(210,120,120,.12);border:1px solid rgba(210,120,120,.2);color:var(--red);border-radius:4px;padding:1px 6px;cursor:pointer;letter-spacing:.05em">초기화</button>
+        <button onclick="showTokenModal()" style="font-family:var(--mono);font-size:7px;background:rgba(212,168,83,.12);border:1px solid rgba(212,168,83,.2);color:var(--gold);border-radius:4px;padding:1px 6px;cursor:pointer;letter-spacing:.05em">🔑토큰</button>
       </div>
     </div>
   </div>
@@ -1356,7 +1357,49 @@ input[type=date]::-webkit-calendar-picker-indicator:hover{opacity:1;}
 // ══════════════════════════════════════════════
 const STORAGE_KEY = 'secondbrain_v2';
 
+// ── GitHub 동기화 설정 ──────────────────────────────
+const GH_OWNER  = 'wlsyoung129-source';
+const GH_REPO   = 'sbos-data';
+const GH_FILE   = 'sbos_data.json';
+const GH_BRANCH = 'main';
+let   GH_TOKEN  = localStorage.getItem('gh_token') || '';
 let   _syncTimer = null;
+let   _ghFileSha = null;
+let   _lastCloudData = null;
+
+// 토큰 입력 모달 표시
+function showTokenModal() {
+  const existing = localStorage.getItem('gh_token') || '';
+  const modal = document.createElement('div');
+  modal.id = 'gh-token-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
+  modal.innerHTML = `
+    <div style="background:#1a1917;border:1px solid rgba(212,168,83,.3);border-radius:16px;padding:28px;width:320px;max-width:90vw">
+      <div style="font-size:22px;margin-bottom:8px">🔑 GitHub 토큰 설정</div>
+      <div style="font-size:12px;color:#7e7870;margin-bottom:16px;line-height:1.6">
+        GitHub Personal Access Token을 입력하면<br>폰·컴퓨터 간 데이터가 자동 동기화돼요.
+      </div>
+      <input id="gh-token-input" type="password" placeholder="ghp_xxxxxxxxxxxx"
+        style="width:100%;padding:12px;background:#222;border:1px solid rgba(255,255,255,.1);border-radius:8px;color:#f2ede5;font-size:14px;margin-bottom:12px"
+        value="${existing}">
+      <div style="display:flex;gap:8px">
+        <button onclick="saveToken()" style="flex:1;padding:11px;background:rgba(212,168,83,.15);border:1px solid rgba(212,168,83,.4);border-radius:8px;color:#d4a853;font-size:14px;cursor:pointer;font-weight:700">저장</button>
+        <button onclick="document.getElementById('gh-token-modal').remove()" style="padding:11px 16px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:8px;color:#7e7870;font-size:14px;cursor:pointer">취소</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  setTimeout(() => document.getElementById('gh-token-input').focus(), 100);
+}
+
+function saveToken() {
+  const t = document.getElementById('gh-token-input').value.trim();
+  if (!t) { alert('토큰을 입력해주세요'); return; }
+  localStorage.setItem('gh_token', t);
+  GH_TOKEN = t;
+  document.getElementById('gh-token-modal').remove();
+  setSaveStatus('토큰 저장됨 ✓', 'var(--green)');
+  loadData();
+}
 
 function setSaveStatus(msg, color) {
   const el = document.getElementById('sb-save-status');
@@ -1368,8 +1411,56 @@ function saveLocal(payload) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
 }
 
-async function saveToCloud(payload) { return; }
-async function loadFromCloud() { return null; }
+// GitHub에 올리기
+async function saveToCloud(payload) {
+  try {
+    const json = JSON.stringify(payload);
+    const content = btoa(unescape(encodeURIComponent(json)));
+    const body = {
+      message: '🧠 SBOS 데이터 동기화',
+      content: content,
+      branch: GH_BRANCH,
+    };
+    if (_ghFileSha) body.sha = _ghFileSha;
+    const res = await fetch(`https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_FILE}`, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `token ${GH_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body)
+    });
+    if (res.ok) {
+      const data = await res.json();
+      _ghFileSha = data.content && data.content.sha;
+      _lastCloudData = json;
+      setSaveStatus('☁️ 동기화됨 ✓', 'var(--green)');
+    } else {
+      throw new Error('GitHub 저장 실패: ' + res.status);
+    }
+  } catch(e) {
+    console.warn('클라우드 저장 실패:', e);
+    setSaveStatus('⚠️ 오프라인 저장', 'var(--gold)');
+  }
+}
+
+// GitHub에서 불러오기
+async function loadFromCloud() {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_FILE}?ref=${GH_BRANCH}&t=${Date.now()}`, {
+      headers: { 'Authorization': `token ${GH_TOKEN}` }
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data.content) return null;
+    _ghFileSha = data.sha;
+    const decoded = decodeURIComponent(escape(atob(data.content.replace(/\n/g, ''))));
+    return decoded;
+  } catch(e) {
+    console.warn('클라우드 불러오기 실패:', e);
+    return null;
+  }
+}
 
 // 메인 saveData — 로컬 즉시 저장 + 클라우드 디바운스 저장
 function saveData() {
@@ -3694,6 +3785,10 @@ function populateCat(id){
 document.addEventListener('DOMContentLoaded', async () => {
   const now=new Date();
   S.calYear=now.getFullYear();S.calMonth=now.getMonth();
+  // 토큰 없으면 모달 표시
+  if (!localStorage.getItem('gh_token')) {
+    setTimeout(() => showTokenModal(), 800);
+  }
   const loaded = await loadData();
   if(loaded) setTimeout(()=>notify('☁️ 데이터 동기화 완료'),500);
   // [FIX5] doneToday 날짜 변경 시 초기화 — 오늘 날짜가 아닌 항목의 doneToday 플래그 리셋
